@@ -1,8 +1,10 @@
 ---
-title: "Relatório Prévio: Análise de Microestrutura e Risco de Rede no Ethereum"
+title: 'Relatório Prévio: Análise de Microestrutura e Risco de Rede no Ethereum'
 author: "Grupo 9"
 date: "27 de Abril de 2026"
-output: 
+output:
+  pdf_document:
+    toc: false
   html_document:
     theme: flatly
     toc: true
@@ -10,11 +12,10 @@ output:
 ---
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
-# Carregando pacotes essenciais
+# Carregando pacotes essenciais (kableExtra removido para compatibilidade nativa de PDF)
 library(tidyverse)
 library(lubridate)
 library(knitr)
-library(kableExtra)
 ```
 
 ## 1. Motivação e Escolha do Problema
@@ -60,9 +61,7 @@ resumo <- df_tx_clean %>%
     `Volume Total (ETH)` = round(sum(eth_value, na.rm = TRUE), 2)
   )
 
-resumo %>%
-  kbl() %>%
-  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F)
+knitr::kable(resumo)
 ```
 
 ### 4.2. Distribuição do Custo de Execução (Risco de Cauda)
