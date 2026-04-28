@@ -1,4 +1,13 @@
-.Rproj.user
+# Histórico e arquivos do R
 .Rhistory
+.Rapp.history
 .RData
 .Ruserdata
+
+# Ignorar as pastas de dados para não subir pro repositório
+data/raw/
+data/processed/
+
+# Credenciais (caso use arquivo JSON de Service Account futuramente)
+*.json
+.Rproj.user

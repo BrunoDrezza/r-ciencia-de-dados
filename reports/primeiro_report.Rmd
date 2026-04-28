@@ -1,0 +1,105 @@
+---
+title: "Relatório Prévio: Análise de Microestrutura e Risco de Rede no Ethereum"
+author: "Grupo 9"
+date: "27 de Abril de 2026"
+output: 
+  html_document:
+    theme: flatly
+    toc: true
+    toc_float: true
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+# Carregando pacotes essenciais
+library(tidyverse)
+library(lubridate)
+library(knitr)
+library(kableExtra)
+```
+
+## 1. Motivação e Escolha do Problema
+
+A motivação para este estudo reside na relevância do Ethereum como a camada base para o ecossistema de Finanças Descentralizadas (DeFi). Do ponto de vista de gestão de risco e economia quantitativa, a rede Ethereum opera como um mercado vivo onde a volatilidade das taxas (*gas*) e a atividade transacional impactam diretamente a liquidez. O objetivo deste projeto é analisar a "saúde sistêmica" da rede e mapear como métricas de atividade on-chain refletem períodos de estresse e congestionamento.
+
+## 2. Descrição da Base de Dados
+
+Os dados foram extraídos via SQL do *dataset* público `bigquery-public-data.crypto_ethereum` no Google Cloud BigQuery. A escolha desta base permite acessar eventos on-chain decodificados, dispensando o processamento moroso de logs hexadecimais brutos.
+
+Para esta análise preliminar, focamos em uma janela dos últimos 7 dias operando sobre duas tabelas principais:
+* **`transactions`**: Contém o histórico de transferências e execuções de contratos. Utilizamos as colunas `hash`, `value` (convertido para Ether) e `gas_price` (convertido para Gwei).
+* **`blocks`**: Registra a mineração/validação de blocos. Utilizamos a coluna `transaction_count` como proxy de demanda pelo espaço do bloco.
+
+## 3. Objetivos Principais e Relações a serem Estudadas
+
+Durante o desenvolvimento do projeto, buscaremos modelar as seguintes dinâmicas quantitativas:
+1. **Modelagem de Risco do Gas:** Analisar a distribuição das taxas de transação e o risco de cauda (*tail risk*) durante choques de volatilidade.
+2. **Estresse de Rede e Congestionamento:** Correlacionar a densidade de transações por bloco com os custos marginais de execução na rede.
+3. **Mapeamento de Regimes:** Identificar mudanças de regime na rede (operações normais vs. *sell-offs* ou alta especulação).
+
+---
+
+## 4. Análise Exploratória Inicial
+
+Os dados foram extraídos e tratados para conversão de unidades financeiras (*Wei* para *Ether* e *Gwei*). 
+
+### 4.1. Estatísticas Descritivas do Custo de Rede
+
+A tabela abaixo sumariza as métricas de base para uma amostra recente. Observa-se uma assimetria evidente no custo do *gas*: a média (0.708 Gwei) é substancialmente maior que a mediana (0.471 Gwei), o que indica que *outliers* de alto custo — comuns em períodos de forte competição no livro de ofertas on-chain — estão puxando o custo da rede para cima. O volume total financeiro rastreado nesta amostra foi superior a 49 mil ETH.
+
+```{r estatisticas}
+# Lendo a base tratada
+df_tx_clean <- readRDS("../data/processed/df_tx_clean.rds")
+
+# Tabela resumo
+resumo <- df_tx_clean %>%
+  summarise(
+    `Média (Gwei)` = round(mean(gas_gwei, na.rm = TRUE), 3),
+    `Mediana (Gwei)` = round(median(gas_gwei, na.rm = TRUE), 3),
+    `Desvio Padrão` = round(sd(gas_gwei, na.rm = TRUE), 3),
+    `Máximo (Gwei)` = round(max(gas_gwei, na.rm = TRUE), 3),
+    `Volume Total (ETH)` = round(sum(eth_value, na.rm = TRUE), 2)
+  )
+
+resumo %>%
+  kbl() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F)
+```
+
+### 4.2. Distribuição do Custo de Execução (Risco de Cauda)
+
+O histograma em escala logarítmica revela uma característica crítica da microestrutura do Ethereum atual: uma **distribuição bimodal**. Isso sugere fortemente a existência de dois "regimes de mercado" distintos. Um pico de concentração em taxas mais baixas (uso comum da rede) e um segundo pico claro na extremidade direita, indicando momentos em que algoritmos e provedores de liquidez pagam um prêmio agressivo para priorizar transações em janelas de volatilidade.
+
+```{r grafico_gas, fig.width=8, fig.height=5}
+# Removendo valores zerados para a escala de log
+df_tx_log <- df_tx_clean %>% filter(gas_gwei > 0)
+
+ggplot(df_tx_log, aes(x = gas_gwei)) +
+  geom_histogram(fill = "#2c3e50", color = "white", bins = 50) +
+  scale_x_log10() +
+  labs(
+    title = "Distribuição Logarítmica do Preço do Gas (Gwei)",
+    subtitle = "Evidência de bimodalidade: Dois regimes de custo na rede",
+    x = "Gas Price (Gwei) - Escala Log",
+    y = "Frequência"
+  ) +
+  theme_minimal()
+```
+
+### 4.3. Congestionamento e Densidade de Blocos
+
+Analisando a série temporal do número de transações alocadas por bloco, notamos um regime de certa estabilidade na maior parte da janela, seguido por um choque acentuado de demanda na virada do dia 26 para o dia 27 de Abril. Esse tipo de "pico de estresse" será o foco central da continuidade da nossa análise, visando quantificar a elasticidade da rede perante aumentos bruscos de fluxo de ordens.
+
+```{r grafico_blocos, fig.width=8, fig.height=5}
+df_blocks <- readRDS("../data/raw/df_blocks_amostra.rds")
+
+ggplot(df_blocks, aes(x = as_datetime(timestamp), y = transaction_count)) +
+  geom_line(color = "#e74c3c", alpha = 0.4) +
+  geom_smooth(method = "gam", color = "black", se = FALSE) +
+  labs(
+    title = "Densidade de Transações por Bloco (Últimos 7 dias)",
+    subtitle = "Choque de congestionamento visível nas últimas 24h",
+    x = "Tempo",
+    y = "Número de Transações"
+  ) +
+  theme_minimal()
+```
