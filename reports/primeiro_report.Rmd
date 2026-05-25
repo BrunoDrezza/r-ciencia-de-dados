@@ -19,6 +19,7 @@ library(lubridate)
 library(knitr)
 library(viridis)
 library(patchwork)
+library(rugarch) # Adicionado para suporte ao objeto S4 do EGARCH
 
 paleta_eth <- viridis::viridis(5, option = "C")
 
@@ -227,7 +228,7 @@ ggplot(df_irf_plot, aes(x = horizonte, y = estimativa)) +
   )
 ```
 
-O teste de Causalidade de Granger falhou em rejeitar a hipótese nula (p-valor > 0.10), indicando que o acoplamento estrutural entre demanda e custo se dá de forma majoritariamente contemporânea. A leitura horizontal das Funções de Resposta ao Impulso mostra que a absorção do choque é rápida: a microestrutura da rede precifica o congestionamento quase imediatamente dentro da mesma janela de 15 minutos, havendo pouca defasagem persistente para ser explorada via arbitragem de latência.
+A leitura das Funções de Resposta ao Impulso revela uma dinâmica estrutural dual na rede. Por um lado, choques na própria demanda (`tx_count`, linha superior) apresentam forte persistência, alterando o patamar de atividade da rede de forma quase permanente dentro do horizonte observado. Por outro lado, a resposta do custo (`log_return`, linha inferior) a qualquer choque é estritamente transitória. Isso demonstra que, embora os surtos de volume transacional tenham memória longa, o mecanismo de leilão de espaço no bloco é altamente eficiente: a microestrutura absorve a volatilidade do congestionamento de forma quase imediata na mesma janela de 15 minutos, revertendo à média sem deixar ineficiências persistentes na precificação.
 
 ---
 
@@ -294,6 +295,6 @@ knitr::kable(tabela_regime,
 
 ## 9. Síntese e Próximos Passos
 
-As quatro camadas econométricas convergem para uma leitura coerente do mercado de gas no Ethereum. O **EGARCH** quantifica o risco de cauda condicional e comprova o efeito alavancagem reverso, indicando que o CVaR domina o VaR em janelas de choques de demanda — o que tornaria as reservas de contingência subdimensionadas caso a análise se restringisse apenas ao VaR. O **VAR** mapeia que o acoplamento entre demanda e custo possui rápida absorção contemporânea, com atrito precificado majoritariamente dentro da própria janela de 15 minutos. O **HMM**, por fim, classifica retrospectivamente quando o regime estressado esteve ativo, oferecendo uma chave de leitura categórica sobre a série contínua de volatilidade.
+As quatro camadas econométricas convergem para uma leitura coerente do mercado de gas no Ethereum. O **EGARCH** quantifica o risco de cauda condicional e comprova o efeito alavancagem reverso, indicando que o CVaR domina o VaR em janelas de choques de demanda — o que tornaria as reservas de contingência subdimensionadas caso a análise se restringisse apenas ao VaR. O **VAR** expõe a natureza dual do sistema: enquanto os surtos de volume transacional (demanda) possuem memória longa e mudam o patamar de atividade da rede de forma persistente, o mecanismo de leilão de espaço no bloco mostra-se altamente eficiente, absorvendo o impacto dos choques sobre o retorno do custo de forma estritamente transiente dentro da própria janela de 15 minutos. O **HMM**, por fim, classifica retrospectivamente quando o regime estressado esteve ativo, oferecendo uma chave de leitura categórica sobre a série contínua de volatilidade.
 
 A continuidade natural do trabalho passa por: (i) estender o EGARCH para especificações multivariadas (DCC-GARCH) cruzando gas com volume em ETH; (ii) testar VAR estrutural com identificação por restrições de sinal; (iii) escalar o HMM para três estados (calmaria, normal, estresse) e correlacionar transições com eventos macro (lançamento de protocolos, liquidações).
