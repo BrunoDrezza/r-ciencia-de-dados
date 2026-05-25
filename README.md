@@ -14,13 +14,17 @@ O projeto segue uma arquitetura modular para garantir reprodutibilidade e isolam
 ├── data/
 │   ├── raw/                   # Dados brutos extraídos do BigQuery via SQL (.rds)
 │   └── processed/             # Dados higienizados e padronizados para modelagem (.rds)
-├── scripts/
-│   ├── 01_setup.R             # Carregamento de dependências e autenticação GCP
-│   ├── 02_extraction.R        # Queries SQL e download das amostras
+├── scr/
+│   ├── 01_set_up.R            # Carregamento de dependências e autenticação GCP
+│   ├── 02_extraction.R        # Queries SQL: tick-by-tick 14d + barras agregadas 30d
 │   ├── 03_analysis.R          # Transformações, conversão de unidades e estatísticas
-│   └── 04_viz.R               # Geração de gráficos analíticos (ggplot2)
+│   ├── 04_viz.R               # Geração de gráficos exploratórios (ggplot2)
+│   ├── 05_features.R          # Carrega barras pré-agregadas e calcula log_return
+│   ├── 06_egarch.R            # EGARCH(1,1) com VaR e CVaR a 95%
+│   ├── 07_var_irf.R           # VAR bivariado e funções de resposta ao impulso
+│   └── 08_hmm.R               # Hidden Markov Model de regimes (normal/estresse)
 ├── reports/
-│   └── relatorio_previo.Rmd   # Documentação acadêmica e consolidação dos resultados
+│   └── primeiro_report.Rmd    # Documentação acadêmica e consolidação dos resultados
 ├── .gitignore                 # Exclusão de credenciais e bases de dados do controle de versão
 └── README.md                  # Este documento
 ```
@@ -29,12 +33,19 @@ O projeto segue uma arquitetura modular para garantir reprodutibilidade e isolam
 
 ## Pré-requisitos e Dependências
 
-A execução deste projeto requer a instalação do `R` e das seguintes bibliotecas:
+A execução deste projeto requer a instalação do `R` (>= 4.1, para o pipe nativo `|>`) e das seguintes bibliotecas:
 * `tidyverse` (Manipulação de dados e visualização)
-* `bigrquery` (Interface de conexão com o Google BigQuery)
-* `lubridate` (Tratamento de séries temporais)
-* `knitr` e `kableExtra` (Geração de relatórios e formatação de tabelas)
+* `bigrquery`, `dbplyr` (Interface de conexão com o Google BigQuery)
+* `lubridate`, `vroom`, `scales` (Tratamento de séries temporais e formatação)
+* `rugarch` (EGARCH e estimação de VaR/CVaR)
+* `vars` (Vetores autorregressivos e funções de resposta ao impulso)
+* `depmixS4` (Hidden Markov Models de mudança de regime)
+* `tseries` (Testes de estacionariedade — ADF)
+* `viridis`, `patchwork` (Paleta consistente e composição de gráficos)
+* `knitr` (Geração de relatórios — `kableExtra` foi dropado para compatibilidade nativa de PDF)
 * `pacman` (Gerenciamento de pacotes)
+
+Todas as dependências são carregadas via `pacman::p_load()` em `scr/01_set_up.R` — instalando automaticamente o que estiver faltando.
 
 ## Configuração de Credenciais (.Renviron)
 
@@ -56,10 +67,17 @@ Para configurar o seu ambiente local de execução, siga os passos abaixo:
 
 ## Ordem de Execução
 
-Para reproduzir a pesquisa e gerar os relatórios, os scripts devem ser executados de forma estritamente sequencial. A definição do *Working Directory* deve estar na raiz do projeto (onde o arquivo `.Rproj` está localizado, se aplicável).
+Para reproduzir a pesquisa e gerar os relatórios, os scripts devem ser executados de forma estritamente sequencial. O *Working Directory* deve estar na raiz do projeto (onde o arquivo `.Rproj` está localizado). Cada script faz `source("scr/01_set_up.R")` no topo — não é necessário pré-carregar pacotes.
 
-1. **`scripts/01_setup.R`**: Estabelece a conexão segura com a API do Google utilizando o email pré-autorizado.
-2. **`scripts/02_extraction.R`**: Executa as queries SQL, delimitando a amostra temporal, e salva os arquivos `.rds` na pasta `data/raw/`.
-3. **`scripts/03_analysis.R`**: Carrega os dados brutos, aplica os fatores de conversão matemática (Wei para Ether/Gwei) e salva a base final em `data/processed/`.
-4. **`scripts/04_viz.R`**: Consome a base processada para plotar as distribuições de probabilidade e as séries temporais de risco.
-5. **`reports/relatorio_previo.Rmd`**: Compila as métricas e os gráficos gerados nas etapas anteriores em um documento HTML/PDF formalizado.
+1. **`scr/01_set_up.R`**: Carrega dependências e estabelece a conexão segura com a API do Google utilizando o email pré-autorizado.
+2. **`scr/02_extraction.R`**: Executa três queries SQL e salva os `.rds` em `data/raw/`:
+   * tick-by-tick (`LIMIT 250000`, 14 dias) — para análise descritiva;
+   * blocos (14 dias) — para densidade de transações;
+   * **barras de 15 min agregadas server-side (30 dias)** — para modelagem econométrica robusta sem custo de RAM.
+3. **`scr/03_analysis.R`**: Carrega o tick-by-tick bruto, aplica os fatores de conversão (Wei → Ether/Gwei) e salva a base limpa em `data/processed/df_tx_clean.rds`.
+4. **`scr/04_viz.R`**: Plota o histograma logarítmico do gas e a série temporal de transações por bloco (análise exploratória).
+5. **`scr/05_features.R`**: Lê as barras pré-agregadas de 30 dias, aplica filtro `tx_count >= 3` e calcula `log_return`; salva `data/processed/df_bars_15m.rds`.
+6. **`scr/06_egarch.R`**: Ajusta um EGARCH(1,1) com inovação t de Student sobre o log-retorno do gas, calcula VaR e CVaR a 95% e persiste `fit_egarch.rds` e `df_risk_bands.rds`.
+7. **`scr/07_var_irf.R`**: Estima um VAR bivariado (demanda × custo) com lag por AIC, extrai funções de resposta ao impulso via bootstrap e salva `fit_var.rds` e `df_irf.rds`.
+8. **`scr/08_hmm.R`**: Ajusta um Hidden Markov Model gaussiano de 2 estados (normal/estresse), persiste `fit_hmm.rds` e `df_bars_15m_with_regime.rds`.
+9. **`reports/primeiro_report.Rmd`**: Compila as métricas, modelos e gráficos em um documento PDF/HTML formalizado. Renderize com `rmarkdown::render("reports/primeiro_report.Rmd")` — os caminhos do Rmd são relativos a `reports/`.

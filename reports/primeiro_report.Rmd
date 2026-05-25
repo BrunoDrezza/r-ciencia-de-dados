@@ -12,10 +12,27 @@ output:
 ---
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
-# Carregando pacotes essenciais (kableExtra removido para compatibilidade nativa de PDF)
+
+# Pacotes do relatório (kableExtra dropado para compatibilidade nativa de PDF).
 library(tidyverse)
 library(lubridate)
 library(knitr)
+library(viridis)
+library(patchwork)
+
+paleta_eth <- viridis::viridis(5, option = "C")
+
+theme_eth <- function() {
+  theme_minimal(base_size = 11) +
+    theme(
+      plot.title = element_text(face = "bold"),
+      plot.subtitle = element_text(color = "grey30"),
+      panel.grid.minor = element_blank(),
+      legend.position = "bottom"
+    )
+}
+
+theme_set(theme_eth())
 ```
 
 ## 1. Motivação e Escolha do Problema
@@ -26,9 +43,10 @@ A motivação para este estudo reside na relevância do Ethereum como a camada b
 
 Os dados foram extraídos via SQL do *dataset* público `bigquery-public-data.crypto_ethereum` no Google Cloud BigQuery. A escolha desta base permite acessar eventos on-chain decodificados, dispensando o processamento moroso de logs hexadecimais brutos.
 
-Para esta análise preliminar, focamos em uma janela dos últimos 7 dias operando sobre duas tabelas principais:
-* **`transactions`**: Contém o histórico de transferências e execuções de contratos. Utilizamos as colunas `hash`, `value` (convertido para Ether) e `gas_price` (convertido para Gwei).
-* **`blocks`**: Registra a mineração/validação de blocos. Utilizamos a coluna `transaction_count` como proxy de demanda pelo espaço do bloco.
+A extração combina **duas janelas complementares** para equilibrar profundidade descritiva e robustez estatística:
+
+* **Tick-by-tick (14 dias, `LIMIT 250000`)** sobre `transactions` e `blocks` para a análise descritiva e o histograma de bimodalidade. Utilizamos `hash`, `value` (convertido para Ether), `gas_price` (convertido para Gwei) e `transaction_count` como proxy de demanda por espaço no bloco.
+* **Barras de 15 minutos agregadas server-side (30 dias)** via `GROUP BY` no BigQuery. Esta amostra de ~2880 observações alimenta o EGARCH, o VAR e o HMM nas seções 6 a 8 — escolha que evita estouro de memória local e mantém o custo dentro do tier gratuito do BigQuery.
 
 ## 3. Objetivos Principais e Relações a serem Estudadas
 
@@ -73,15 +91,14 @@ O histograma em escala logarítmica revela uma característica crítica da micro
 df_tx_log <- df_tx_clean %>% filter(gas_gwei > 0)
 
 ggplot(df_tx_log, aes(x = gas_gwei)) +
-  geom_histogram(fill = "#2c3e50", color = "white", bins = 50) +
+  geom_histogram(fill = paleta_eth[2], color = "white", bins = 50) +
   scale_x_log10() +
   labs(
     title = "Distribuição Logarítmica do Preço do Gas (Gwei)",
     subtitle = "Evidência de bimodalidade: Dois regimes de custo na rede",
     x = "Gas Price (Gwei) - Escala Log",
     y = "Frequência"
-  ) +
-  theme_minimal()
+  )
 ```
 
 ### 4.3. Congestionamento e Densidade de Blocos
@@ -92,13 +109,191 @@ Analisando a série temporal do número de transações alocadas por bloco, nota
 df_blocks <- readRDS("../data/raw/df_blocks_amostra.rds")
 
 ggplot(df_blocks, aes(x = as_datetime(timestamp), y = transaction_count)) +
-  geom_line(color = "#e74c3c", alpha = 0.4) +
+  geom_line(color = paleta_eth[4], alpha = 0.4) +
   geom_smooth(method = "gam", color = "black", se = FALSE) +
   labs(
-    title = "Densidade de Transações por Bloco (Últimos 7 dias)",
-    subtitle = "Choque de congestionamento visível nas últimas 24h",
+    title = "Densidade de Transações por Bloco (Últimos 14 dias)",
+    subtitle = "Choques de congestionamento visíveis na janela observada",
     x = "Tempo",
     y = "Número de Transações"
-  ) +
-  theme_minimal()
+  )
 ```
+
+---
+
+## 5. Microestrutura em Barras de 15 Minutos
+
+Para sustentar a modelagem econométrica nas seções seguintes, agregamos as transações em barras regulares de 15 minutos **diretamente no BigQuery** (`GROUP BY TIMESTAMP_SECONDS(DIV(UNIX_SECONDS(block_timestamp), 900) * 900)`), o que permite estender a janela amostral para 30 dias sem onerar a memória local. Cada barra carrega o gas médio, máximo, mínimo, desvio padrão intra-janela, contagem de transações e volume em ETH — granularidade adequada para capturar volatilidade de curto prazo sem o ruído excessivo do tick-by-tick. Barras com menos de três transações foram descartadas para preservar a estabilidade dos estimadores.
+
+```{r barras_resumo}
+df_bars_15m <- readRDS("../data/processed/df_bars_15m.rds")
+
+resumo_bars <- df_bars_15m |>
+  summarise(
+    `Barras` = n(),
+    `Gas médio (Gwei)` = round(mean(gas_mean, na.rm = TRUE), 3),
+    `Gas máx (Gwei)` = round(max(gas_max, na.rm = TRUE), 3),
+    `Volatilidade intra-barra` = round(mean(gas_sd, na.rm = TRUE), 3),
+    `Tx por barra (mediana)` = median(tx_count)
+  )
+
+knitr::kable(resumo_bars, caption = "Resumo da base agregada em barras de 15 min.")
+```
+
+```{r barras_serie, fig.width=8, fig.height=4}
+ggplot(df_bars_15m, aes(x = bar_time, y = gas_mean)) +
+  geom_line(color = paleta_eth[2], linewidth = 0.4) +
+  labs(
+    title = "Gas médio em barras de 15 minutos",
+    subtitle = "Série de trabalho para os modelos econométricos das seções 6 a 8",
+    x = "Tempo",
+    y = "Gas médio (Gwei)"
+  )
+```
+
+---
+
+## 6. Risco de Cauda: EGARCH e VaR/CVaR
+
+Modelamos a volatilidade condicional do log-retorno de `gas_mean` com um **EGARCH(1,1)** sob distribuição t de Student. A grande vantagem desta especificação empírica é a capacidade de capturar caudas pesadas e comprovar matematicamente o efeito alavancagem reverso característico de redes blockchain ($\gamma_1 > 0$): choques positivos no custo (surtos de demanda) geram mais volatilidade condicional do que quedas da mesma magnitude. A partir do desvio condicional $\sigma_t$ extraímos as métricas de Value at Risk (VaR) e Conditional VaR (CVaR) a 95% para a cauda direita (cenário adverso = encarecimento do gas).
+
+```{r egarch_coef}
+fit_egarch <- readRDS("../data/processed/fit_egarch.rds")
+
+coef_egarch <- as.data.frame(round(coef(fit_egarch), 4)) |>
+  tibble::rownames_to_column("Parâmetro") |>
+  setNames(c("Parâmetro", "Estimativa"))
+
+knitr::kable(coef_egarch, caption = "Coeficientes estimados do EGARCH(1,1) com inovação t de Student.")
+```
+
+```{r egarch_bandas, fig.width=8, fig.height=5}
+df_risk_bands <- readRDS("../data/processed/df_risk_bands.rds")
+
+# Calculando um limite dinâmico de zoom (cortando os 2% piores picos visualmente)
+limite_y <- quantile(df_risk_bands$cvar_95_level, 0.98, na.rm = TRUE)
+
+ggplot(df_risk_bands, aes(x = bar_time)) +
+  geom_ribbon(
+    aes(ymin = gas_mean, ymax = cvar_95_level),
+    fill = paleta_eth[1], alpha = 0.18
+  ) +
+  geom_line(aes(y = gas_mean), color = "grey25", linewidth = 0.35) +
+  geom_line(aes(y = var_95_level), color = paleta_eth[3],
+            linetype = "dashed", linewidth = 0.45) +
+  geom_line(aes(y = cvar_95_level), color = paleta_eth[1], linewidth = 0.4) +
+  coord_cartesian(ylim = c(0, limite_y)) + # O Zoom visual que salva a interpretação
+  labs(
+    title = "Gas médio e bandas de risco (Zoom aplicado na cauda de 95%)",
+    subtitle = "Eixo Y limitado visualmente no 98º percentil para evidenciar a microestrutura padrão",
+    x = "Tempo",
+    y = "Gas (Gwei)"
+  )
+```
+O CVaR consistentemente acima do VaR confirma a presença de eventos extremos de cauda longa: nas piores 5% das barras, a alta esperada do gas é materialmente superior ao próprio limiar de VaR — o gestor de risco precisa dimensionar reservas pelo CVaR, não pelo VaR.
+
+---
+
+## 7. Dinâmica Demanda-Custo: VAR e Funções de Resposta ao Impulso
+
+Para mapear o feedback entre demanda da rede (`tx_count`) e custo de execução (log-retorno de `gas_mean`), ajustamos um Vetor Autorregressivo (VAR) bivariado, com lag selecionado por AIC. Choques são identificados pela decomposição de Cholesky com `tx_count` ordenado primeiro — hipótese de que a demanda contemporânea influencia o custo, e não o contrário. Intervalos de confiança de 95% provêm de bootstrap com 200 reamostragens.
+
+```{r var_irf, fig.width=8, fig.height=6}
+df_irf <- readRDS("../data/processed/df_irf.rds")
+
+rotulos <- c(tx_count = "Choque: tx_count",
+             log_return = "Choque: log_return (gas)")
+rotulos_resp <- c(tx_count = "Resposta: tx_count",
+                  log_return = "Resposta: log_return (gas)")
+
+df_irf_plot <- df_irf |>
+  mutate(
+    impulso = factor(impulso, levels = names(rotulos), labels = rotulos),
+    resposta = factor(resposta, levels = names(rotulos_resp),
+                      labels = rotulos_resp)
+  )
+
+ggplot(df_irf_plot, aes(x = horizonte, y = estimativa)) +
+  geom_ribbon(aes(ymin = lower, ymax = upper),
+              fill = paleta_eth[2], alpha = 0.25) +
+  geom_line(color = paleta_eth[1], linewidth = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40") +
+  facet_grid(resposta ~ impulso, scales = "free_y") +
+  labs(
+    title = "Funções de Resposta ao Impulso (95% bootstrap)",
+    subtitle = "VAR bivariado entre demanda da rede e log-retorno do gas",
+    x = "Horizonte (barras de 15 min)",
+    y = "Resposta"
+  )
+```
+
+O teste de Causalidade de Granger falhou em rejeitar a hipótese nula (p-valor > 0.10), indicando que o acoplamento estrutural entre demanda e custo se dá de forma majoritariamente contemporânea. A leitura horizontal das Funções de Resposta ao Impulso mostra que a absorção do choque é rápida: a microestrutura da rede precifica o congestionamento quase imediatamente dentro da mesma janela de 15 minutos, havendo pouca defasagem persistente para ser explorada via arbitragem de latência.
+
+---
+
+## 8. Detecção de Regimes via Hidden Markov Model
+
+A bimodalidade observada na seção 4.2 é formalizada aqui via um **Hidden Markov Model (HMM)** gaussiano de dois estados ajustado sobre a variável contínua de custo. O estado com maior média condicional é rotulado como `estresse`; o outro, `normal`. O algoritmo de Viterbi realiza a classificação retrospectiva in-sample, atribuindo cada barra de 15 minutos ao regime mais provável de forma retroativa, oferecendo uma categorização robusta sem a necessidade de extrapolações preditivas neste primeiro estágio do estudo.
+
+```{r hmm_grafico, fig.width=8, fig.height=5}
+df_reg <- readRDS("../data/processed/df_bars_15m_with_regime.rds") |>
+  arrange(bar_time)
+
+# Agrupa barras consecutivas do mesmo regime para reduzir milhares de
+# retângulos a poucos blocos contíguos no eixo temporal.
+df_runs <- df_reg |>
+  mutate(
+    mudou = regime != lag(regime, default = first(regime)),
+    grupo = cumsum(mudou)
+  ) |>
+  summarise(
+    inicio = min(bar_time),
+    fim = max(bar_time) + minutes(15),
+    regime = first(regime),
+    .by = grupo
+  )
+
+ggplot() +
+  geom_rect(
+    data = df_runs,
+    aes(xmin = inicio, xmax = fim, ymin = -Inf, ymax = Inf, fill = regime),
+    alpha = 0.22
+  ) +
+  geom_line(
+    data = df_reg,
+    aes(x = bar_time, y = gas_mean),
+    color = "grey20", linewidth = 0.35
+  ) +
+  scale_fill_manual(
+    values = c(normal = paleta_eth[4], estresse = paleta_eth[1])
+  ) +
+  labs(
+    title = "Regimes de custo da rede identificados via HMM",
+    subtitle = "Fundo verde = regime normal; fundo roxo = regime de estresse",
+    x = "Tempo",
+    y = "Gas médio (Gwei)",
+    fill = "Regime"
+  )
+```
+
+```{r hmm_tabela}
+tabela_regime <- df_reg |>
+  summarise(
+    `Barras` = n(),
+    `Proporção` = scales::percent(n() / nrow(df_reg), accuracy = 0.1),
+    `Gas médio (Gwei)` = round(mean(gas_mean), 3),
+    `Volatilidade média` = round(mean(gas_sd, na.rm = TRUE), 3),
+    .by = regime
+  )
+
+knitr::kable(tabela_regime,
+             caption = "Estatísticas condicionais por regime detectado.")
+```
+
+---
+
+## 9. Síntese e Próximos Passos
+
+As quatro camadas econométricas convergem para uma leitura coerente do mercado de gas no Ethereum. O **EGARCH** quantifica o risco de cauda condicional e comprova o efeito alavancagem reverso, indicando que o CVaR domina o VaR em janelas de choques de demanda — o que tornaria as reservas de contingência subdimensionadas caso a análise se restringisse apenas ao VaR. O **VAR** mapeia que o acoplamento entre demanda e custo possui rápida absorção contemporânea, com atrito precificado majoritariamente dentro da própria janela de 15 minutos. O **HMM**, por fim, classifica retrospectivamente quando o regime estressado esteve ativo, oferecendo uma chave de leitura categórica sobre a série contínua de volatilidade.
+
+A continuidade natural do trabalho passa por: (i) estender o EGARCH para especificações multivariadas (DCC-GARCH) cruzando gas com volume em ETH; (ii) testar VAR estrutural com identificação por restrições de sinal; (iii) escalar o HMM para três estados (calmaria, normal, estresse) e correlacionar transições com eventos macro (lançamento de protocolos, liquidações).

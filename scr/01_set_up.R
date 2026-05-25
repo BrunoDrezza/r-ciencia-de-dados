@@ -1,5 +1,8 @@
 if (!require("pacman")) install.packages("pacman")
-pacman::p_load(tidyverse, bigrquery, dbplyr, lubridate, vroom, scales)
+pacman::p_load(
+  tidyverse, bigrquery, dbplyr, lubridate, vroom, scales,
+  rugarch, vars, depmixS4, tseries, patchwork, viridis
+)
 
 project_id <- Sys.getenv("GCP_PROJECT_ID")
 
